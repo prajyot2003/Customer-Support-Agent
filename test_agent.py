@@ -4,53 +4,56 @@ import os
 from types import SimpleNamespace as NS
 
 import agent
+import database
+import tools
+from dispatcher import dispatch
 
 
 def fresh():
-    agent.DB = agent.init_db(":memory:")  # tests never touch the real orders.db
+    database.DB = database.init_db(":memory:")  # tests never touch the real orders.db
 
 
 # ---------------- Offline: tools, dispatcher, guardrails ----------------
 def test_dispatcher_rejects_unknown_tool():
-    assert agent.dispatch("delete_database", "{}")["error"] == "UNAUTHORIZED_TOOL"
+    assert dispatch("delete_database", "{}")["error"] == "UNAUTHORIZED_TOOL"
 
 
 def test_dispatcher_rejects_malformed_args():
     fresh()
-    assert agent.dispatch("lookup_order", "{not json")["error"] == "MALFORMED_ARGUMENTS"
-    assert agent.dispatch("lookup_order", "{}")["error"] == "INVALID_ARGUMENTS"
-    assert agent.dispatch("lookup_order", '{"order_id": 1001}')["error"] == "INVALID_ARGUMENTS"
-    assert agent.dispatch("lookup_order", '{"order_id": "ORD-1001", "x": "y"}')["error"] == "INVALID_ARGUMENTS"
+    assert dispatch("lookup_order", "{not json")["error"] == "MALFORMED_ARGUMENTS"
+    assert dispatch("lookup_order", "{}")["error"] == "INVALID_ARGUMENTS"
+    assert dispatch("lookup_order", '{"order_id": 1001}')["error"] == "INVALID_ARGUMENTS"
+    assert dispatch("lookup_order", '{"order_id": "ORD-1001", "x": "y"}')["error"] == "INVALID_ARGUMENTS"
 
 
 def test_order_not_found_is_structured():
     fresh()
-    r = agent.dispatch("lookup_order", '{"order_id": "ORD-9999"}')
+    r = dispatch("lookup_order", '{"order_id": "ORD-9999"}')
     assert r["status"] == "error" and r["error"] == "ORDER_NOT_FOUND"
 
 
 def test_refund_blocked_when_exchange_possible():
     fresh()
-    assert agent.process_refund("ORD-1001", "damaged")["error"] == "EXCHANGE_AVAILABLE"
+    assert tools.process_refund("ORD-1001", "damaged")["error"] == "EXCHANGE_AVAILABLE"
 
 
 def test_exchange_blocked_when_out_of_stock_or_ineligible():
     fresh()
-    assert agent.create_exchange("ORD-1002")["error"] == "OUT_OF_STOCK"
-    assert agent.create_exchange("ORD-1003")["error"] == "NOT_ELIGIBLE"
+    assert tools.create_exchange("ORD-1002")["error"] == "OUT_OF_STOCK"
+    assert tools.create_exchange("ORD-1003")["error"] == "NOT_ELIGIBLE"
 
 
 def test_refund_amount_from_db_and_no_double_refund():
     fresh()
-    r = agent.process_refund("ORD-1002", "out of stock")
+    r = tools.process_refund("ORD-1002", "out of stock")
     assert r["status"] == "success" and r["amount_refunded"] == 34.50
-    assert agent.process_refund("ORD-1002", "again")["error"] == "ALREADY_REFUNDED"
+    assert tools.process_refund("ORD-1002", "again")["error"] == "ALREADY_REFUNDED"
 
 
 def test_exchange_decrements_stock():
     fresh()
-    assert agent.create_exchange("ORD-1001")["status"] == "success"
-    assert agent.check_inventory("SKU-HEADPHONES")["stock"] == 11
+    assert tools.create_exchange("ORD-1001")["status"] == "success"
+    assert tools.check_inventory("SKU-HEADPHONES")["stock"] == 11
 
 
 # ---------------- Offline: ReAct loop with a scripted fake model ----------------
@@ -80,7 +83,7 @@ def test_loop_executes_tools_and_feeds_results_back():
     out = agent.run_agent("ORD-1002 damaged", client=fake, verbose=False)
     assert out["trace"] == ["lookup_order", "check_inventory", "process_refund", "send_notification"]
     assert not out["escalated"]
-    assert agent.DB.execute("SELECT COUNT(*) FROM refunds").fetchone()[0] == 1
+    assert database.DB.execute("SELECT COUNT(*) FROM refunds").fetchone()[0] == 1
 
 
 def test_loop_escalates_at_max_iterations():

@@ -2,7 +2,7 @@
 
 An autonomous, tool-using AI agent that resolves damaged-item complaints. It reads order records, checks warehouse stock, and decides on its own whether to **exchange** the item or **refund** the customer, then sends a confirmation email.
 
-Built with the [Groq](https://groq.com) API (OpenAI-compatible tool calling) and a hand-written ReAct loop. There is no agent framework, so every step is visible in [`agent.py`](agent.py).
+Built with the [Groq](https://groq.com) API (OpenAI-compatible tool calling) and a hand-written ReAct loop. There is no agent framework, so every step is visible in the code, one file per stage (see [Project structure](#project-structure)).
 
 ## How it works
 
@@ -127,12 +127,17 @@ Tests use a fresh in-memory database and never modify `orders.db`.
 
 ## Project structure
 
-```
-agent.py        tools, schemas, dispatcher, ReAct loop, chat CLI
-test_agent.py   offline + live tests
-.env            your API key (create it; git-ignored)
-orders.db       SQLite data (auto-created; git-ignored)
-```
+| File | Assignment step | What it contains |
+|---|---|---|
+| [`database.py`](database.py) | Data | SQLite schema, sample data, `init_db()` |
+| [`tools.py`](tools.py) | Steps 1 + 2 | The 5 tool functions and their JSON schemas (`TOOLS`) |
+| [`dispatcher.py`](dispatcher.py) | Step 3 | `REGISTRY` whitelist and `dispatch()` with argument validation |
+| [`agent.py`](agent.py) | Steps 4 + 5 | ReAct loop, iteration ceiling and escalation, `.env` loading, chat CLI |
+| [`test_agent.py`](test_agent.py) | Acceptance | Offline + live tests |
+| `.env` | | Your API key (create it; git-ignored) |
+| `orders.db` | | SQLite data (auto-created; git-ignored) |
+
+Dependencies flow one way: `database.py` → `tools.py` → `dispatcher.py` → `agent.py`.
 
 ## Configuration
 
