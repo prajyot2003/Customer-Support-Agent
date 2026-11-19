@@ -17,7 +17,7 @@ Customer message
       │                        └──────────────────┘──► process_refund
       │ final answer                                 ──► send_notification
       ▼
- Reply to customer          (loop ends after 6 rounds → escalate to a human)
+ Reply to customer          (loop ends after 10 rounds → escalate to a human)
 ```
 
 **Decision logic**
@@ -37,11 +37,11 @@ The model is never told which tools to call for a given request. It works that o
 - **Declarative JSON schemas** with descriptions, typed parameters, and required fields
 - **Whitelisted dispatcher.** Unknown tool names are rejected with `UNAUTHORIZED_TOOL`.
 - **Argument validation.** Malformed JSON, missing, unknown, wrong-type, or empty arguments are returned to the model so it can correct itself.
-- **Iteration ceiling.** The agent escalates to a human if a message isn't resolved within 6 rounds.
+- **Iteration ceiling.** The agent escalates to a human if a message isn't resolved within 10 rounds, and tells the customer about any refund or exchange already made.
 - **Policy enforced in code, not just the prompt**:
   - refunds are refused when an exchange is possible
   - exchanges are refused when out of stock or ineligible
-  - no double refunds or double exchanges
+  - one resolution per order: no double refunds, and no refund after an exchange (or vice versa)
   - the refund amount always comes from the database, never from the model
 - **Persistent SQLite database** (`orders.db`), created and seeded on first run
 - **Interactive chat** with conversation memory, so the customer can correct a wrong order ID
@@ -120,7 +120,7 @@ sqlite3 orders.db "select * from orders; select * from refunds; select * from ex
 python3 test_agent.py
 ```
 
-- **10 offline tests** need no API key. They cover the dispatcher whitelist, argument validation, the refund and exchange policy guards, double-refund prevention, the ReAct loop driven by a scripted fake model, max-iteration escalation, and multi-turn memory.
+- **14 offline tests** need no API key. They cover the dispatcher whitelist, argument validation, the refund and exchange policy guards, one-resolution-per-order, order ID normalization, reply cleanup, the ReAct loop driven by a scripted fake model, max-iteration escalation, and multi-turn memory.
 - **4 live tests** run against Groq when `GROQ_API_KEY` is set. They check the 4 acceptance scenarios in the sample-data table, including the exact order of tool calls.
 
 Tests use a fresh in-memory database and never modify `orders.db`.

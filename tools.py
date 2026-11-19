@@ -2,13 +2,33 @@
 
 Every tool returns a structured dict with "status": "success" | "error".
 """
+import re
 import uuid
 
 import database
 
 
+def normalize_order_id(order_id):
+    """Accept what customers actually type: 'ord1002', 'ORD 1002', '#1002', '1002' -> 'ORD-1002'."""
+    raw = order_id.strip().upper()
+    digits = re.sub(r"\D", "", raw)
+    letters = re.sub(r"[^A-Z]", "", raw)
+    return f"ORD-{digits}" if digits and letters in ("", "ORD") else raw
+
+
 def _order(order_id):
-    return database.DB.execute("SELECT * FROM orders WHERE order_id = ?", (order_id.strip().upper(),)).fetchone()
+    return database.DB.execute("SELECT * FROM orders WHERE order_id = ?", (normalize_order_id(order_id),)).fetchone()
+
+
+def _existing_resolution(order_id):
+    db = database.DB
+    r = db.execute("SELECT refund_id, amount FROM refunds WHERE order_id = ?", (order_id,)).fetchone()
+    if r:
+        return {"type": "refund", "reference": r["refund_id"], "amount": r["amount"]}
+    e = db.execute("SELECT exchange_id FROM exchanges WHERE order_id = ?", (order_id,)).fetchone()
+    if e:
+        return {"type": "exchange", "reference": e["exchange_id"]}
+    return None
 
 
 def _stock(item_id):
@@ -23,11 +43,14 @@ def lookup_order(order_id):
     o = _order(order_id)
     if not o:
         return {"status": "error", "error": "ORDER_NOT_FOUND",
-                "message": f"No order with id '{order_id}'. Ask the customer to verify the order ID."}
+                "message": f"No order with id '{normalize_order_id(order_id)}'. Ask the customer to verify the order ID."}
+    item = database.DB.execute("SELECT item_name FROM inventory WHERE item_id = ?", (o["item_id"],)).fetchone()
     return {"status": "success", "order_id": o["order_id"], "customer_name": o["customer_name"],
-            "customer_email": o["customer_email"], "item_id": o["item_id"], "amount": o["amount"],
+            "customer_email": o["customer_email"], "item_id": o["item_id"],
+            "item_name": item["item_name"] if item else o["item_id"], "amount": o["amount"],
             "order_status": o["status"], "exchange_eligible": bool(o["exchange_eligible"]),
-            "eligibility_note": o["eligibility_note"]}
+            "eligibility_note": o["eligibility_note"],
+            "existing_resolution": _existing_resolution(o["order_id"])}
 
 
 def check_inventory(item_id):
@@ -43,13 +66,15 @@ def create_exchange(order_id):
     o = _order(order_id)
     if not o:
         return {"status": "error", "error": "ORDER_NOT_FOUND", "message": f"No order '{order_id}'."}
+    done = _existing_resolution(o["order_id"])
+    if done:
+        return {"status": "error", "error": "ALREADY_RESOLVED",
+                "message": f"This order was already resolved by {done['type']} {done['reference']}.", "existing_resolution": done}
     # Policy enforced in code, not just in the prompt.
     if not o["exchange_eligible"]:
         return {"status": "error", "error": "NOT_ELIGIBLE", "message": "Order is not eligible for exchange; issue a refund instead."}
     if _stock(o["item_id"]) <= 0:
         return {"status": "error", "error": "OUT_OF_STOCK", "message": "No replacement units in stock; issue a refund instead."}
-    if db.execute("SELECT 1 FROM exchanges WHERE order_id = ?", (o["order_id"],)).fetchone():
-        return {"status": "error", "error": "ALREADY_EXCHANGED", "message": "An exchange already exists for this order."}
     exchange_id = "EXC-" + uuid.uuid4().hex[:8].upper()
     with db:
         db.execute("UPDATE inventory SET stock = stock - 1 WHERE item_id = ?", (o["item_id"],))
@@ -62,12 +87,14 @@ def process_refund(order_id, reason):
     o = _order(order_id)
     if not o:
         return {"status": "error", "error": "ORDER_NOT_FOUND", "message": f"No order '{order_id}'."}
+    done = _existing_resolution(o["order_id"])
+    if done:
+        return {"status": "error", "error": "ALREADY_RESOLVED",
+                "message": f"This order was already resolved by {done['type']} {done['reference']}.", "existing_resolution": done}
     # Money path guard: refunds only when an exchange is impossible.
     if o["exchange_eligible"] and _stock(o["item_id"]) > 0:
         return {"status": "error", "error": "EXCHANGE_AVAILABLE",
                 "message": "Replacement is in stock and order is eligible; create an exchange instead of refunding."}
-    if db.execute("SELECT 1 FROM refunds WHERE order_id = ?", (o["order_id"],)).fetchone():
-        return {"status": "error", "error": "ALREADY_REFUNDED", "message": "This order was already refunded."}
     refund_id = "RFD-" + uuid.uuid4().hex[:8].upper()
     with db:  # amount comes from the DB, never from the model
         db.execute("INSERT INTO refunds VALUES (?, ?, ?, ?)", (refund_id, o["order_id"], o["amount"], reason))
@@ -98,9 +125,10 @@ def _schema(name, description, params):
 
 TOOLS = [
     _schema("lookup_order",
-            "Look up an order in the database. Returns customer name, email, item_id, amount, order status "
-            "and whether the order is eligible for exchange. Always call this first.",
-            {"order_id": "Order identifier, e.g. 'ORD-1001'."}),
+            "Look up an order in the database. Returns customer name, email, item, amount, order status, "
+            "exchange eligibility, and existing_resolution (a refund/exchange already done for this order, or null). "
+            "Always call this first.",
+            {"order_id": "Order identifier exactly as the customer gave it, e.g. 'ORD-1001', 'ord1001' or '1001'."}),
     _schema("check_inventory",
             "Check real-time warehouse stock for an item to see if a replacement unit is available.",
             {"item_id": "Item identifier from lookup_order, e.g. 'SKU-KETTLE'."}),

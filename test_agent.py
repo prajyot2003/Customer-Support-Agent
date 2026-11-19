@@ -47,13 +47,32 @@ def test_refund_amount_from_db_and_no_double_refund():
     fresh()
     r = tools.process_refund("ORD-1002", "out of stock")
     assert r["status"] == "success" and r["amount_refunded"] == 34.50
-    assert tools.process_refund("ORD-1002", "again")["error"] == "ALREADY_REFUNDED"
+    assert tools.process_refund("ORD-1002", "again")["error"] == "ALREADY_RESOLVED"
 
 
-def test_exchange_decrements_stock():
+def test_exchange_decrements_stock_and_blocks_later_refund():
     fresh()
     assert tools.create_exchange("ORD-1001")["status"] == "success"
     assert tools.check_inventory("SKU-HEADPHONES")["stock"] == 11
+    assert tools.process_refund("ORD-1001", "changed mind")["error"] == "ALREADY_RESOLVED"
+
+
+def test_order_id_normalization():
+    for typed in ("ORD-1002", "ord1002", "ORD 1002", "#1002", "1002"):
+        assert tools.normalize_order_id(typed) == "ORD-1002", typed
+    assert tools.normalize_order_id("ABC-1002") == "ABC-1002"  # other prefixes are left alone
+    fresh()
+    assert tools.lookup_order("ord1002")["order_id"] == "ORD-1002"
+    assert tools.lookup_order("1001")["customer_name"] == "Priya Sharma"
+
+
+def test_lookup_reports_existing_resolution():
+    fresh()
+    assert tools.lookup_order("ORD-1002")["existing_resolution"] is None
+    refund = tools.process_refund("ORD-1002", "out of stock")
+    done = tools.lookup_order("ORD-1002")["existing_resolution"]
+    assert done == {"type": "refund", "reference": refund["refund_id"], "amount": 34.50}
+    assert tools.lookup_order("ORD-1003")["item_name"] == "Desk Lamp"
 
 
 # ---------------- Offline: ReAct loop with a scripted fake model ----------------
@@ -91,6 +110,19 @@ def test_loop_escalates_at_max_iterations():
     fake = FakeClient([[("lookup_order", {"order_id": "ORD-1001"})]] * (agent.MAX_ITERATIONS + 1))
     out = agent.run_agent("help", client=fake, verbose=False)
     assert out["escalated"] and len(out["trace"]) == agent.MAX_ITERATIONS
+
+
+def test_clean_reply_fixes_hyphens_and_markdown():
+    assert agent.clean_reply("Ref **RFD‑AB12** for ORD‐1002") == "Ref RFD-AB12 for ORD-1002"
+
+
+def test_escalation_reports_actions_already_taken():
+    fresh()
+    turns = [[("process_refund", {"order_id": "ORD-1002", "reason": "out of stock"})]]
+    turns += [[("lookup_order", {"order_id": "ORD-1001"})]] * agent.MAX_ITERATIONS
+    out = agent.run_agent("help", client=FakeClient(turns), verbose=False)
+    assert out["escalated"]
+    assert "refund of $34.50 for ORD-1002" in out["reply"] and "RFD-" in out["reply"]
 
 
 def test_multi_turn_keeps_history():
