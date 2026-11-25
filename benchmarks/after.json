@@ -1,0 +1,85 @@
+{
+  "model": "openai/gpt-oss-120b",
+  "conversations": {
+    "exchange": {
+      "model_calls": 5,
+      "prompt_tokens": 4335,
+      "completion_tokens": 257,
+      "total_tokens": 4592,
+      "llm_seconds": 2.4,
+      "db_queries": 9,
+      "cache_hits": 0,
+      "tool_calls": 4
+    },
+    "refund_out_of_stock": {
+      "model_calls": 5,
+      "prompt_tokens": 4375,
+      "completion_tokens": 295,
+      "total_tokens": 4670,
+      "llm_seconds": 7.05,
+      "db_queries": 9,
+      "cache_hits": 0,
+      "tool_calls": 4
+    },
+    "refund_ineligible": {
+      "model_calls": 4,
+      "prompt_tokens": 3386,
+      "completion_tokens": 254,
+      "total_tokens": 3640,
+      "llm_seconds": 15.41,
+      "db_queries": 7,
+      "cache_hits": 0,
+      "tool_calls": 3
+    },
+    "invalid_order": {
+      "model_calls": 2,
+      "prompt_tokens": 1508,
+      "completion_tokens": 105,
+      "total_tokens": 1613,
+      "llm_seconds": 7.77,
+      "db_queries": 1,
+      "cache_hits": 0,
+      "tool_calls": 1
+    },
+    "two_orders": {
+      "model_calls": 9,
+      "prompt_tokens": 9176,
+      "completion_tokens": 433,
+      "total_tokens": 9609,
+      "llm_seconds": 43.9,
+      "db_queries": 18,
+      "cache_hits": 0,
+      "tool_calls": 8
+    },
+    "status_then_followup": {
+      "model_calls": 4,
+      "prompt_tokens": 3348,
+      "completion_tokens": 197,
+      "total_tokens": 3545,
+      "llm_seconds": 7.69,
+      "db_queries": 4,
+      "cache_hits": 1,
+      "tool_calls": 2
+    },
+    "multi_turn_refund": {
+      "model_calls": 9,
+      "prompt_tokens": 8318,
+      "completion_tokens": 491,
+      "total_tokens": 8809,
+      "llm_seconds": 36.97,
+      "db_queries": 12,
+      "cache_hits": 0,
+      "tool_calls": 5
+    }
+  },
+  "totals": {
+    "model_calls": 38,
+    "prompt_tokens": 34446,
+    "completion_tokens": 2032,
+    "total_tokens": 36478,
+    "llm_seconds": 121.19,
+    "db_queries": 60,
+    "cache_hits": 1,
+    "tool_calls": 27
+  }
+}

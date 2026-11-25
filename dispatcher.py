@@ -3,6 +3,7 @@
 The model can only reach functions listed in REGISTRY; everything else is rejected.
 """
 import json
+import threading
 
 from tools import (TOOLS, check_inventory, create_exchange, lookup_order, process_refund,
                    send_notification)
@@ -11,6 +12,10 @@ REGISTRY = {"lookup_order": lookup_order, "check_inventory": check_inventory,
             "create_exchange": create_exchange, "process_refund": process_refund,
             "send_notification": send_notification}
 SCHEMAS = {t["function"]["name"]: t["function"]["parameters"] for t in TOOLS}
+# Tool calls from one model turn run on worker threads (agent.py). They share one SQLite connection and the
+# tools.py cache, so execution is serialised here; validation above still runs concurrently.
+# ponytail: one global lock; use a connection per thread if tools start doing slow network I/O.
+_TOOL_LOCK = threading.Lock()
 
 
 def dispatch(name, raw_args):
@@ -31,6 +36,7 @@ def dispatch(name, raw_args):
         return {"status": "error", "error": "INVALID_ARGUMENTS",
                 "message": f"missing={missing} unknown={unknown} not_string={bad_type} empty={empty}"}
     try:
-        return REGISTRY[name](**args)
+        with _TOOL_LOCK:
+            return REGISTRY[name](**args)
     except Exception as e:  # a tool bug must never crash the agent loop
         return {"status": "error", "error": "TOOL_FAILURE", "message": str(e)}

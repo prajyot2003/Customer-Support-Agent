@@ -30,7 +30,7 @@ def init_db(path=None):
     """Open the orders database, creating + seeding it on first use."""
     path = path or DB_PATH
     is_new = path == ":memory:" or not os.path.exists(path)
-    db = sqlite3.connect(path)
+    db = sqlite3.connect(path, check_same_thread=False)  # used from tool worker threads; dispatcher serialises access
     db.row_factory = sqlite3.Row
     if is_new:
         db.executescript(SEED)

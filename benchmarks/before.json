@@ -1,0 +1,85 @@
+{
+  "model": "openai/gpt-oss-120b",
+  "conversations": {
+    "exchange": {
+      "model_calls": 5,
+      "prompt_tokens": 6867,
+      "completion_tokens": 418,
+      "total_tokens": 7285,
+      "llm_seconds": 3.27,
+      "db_queries": 9,
+      "cache_hits": 0,
+      "tool_calls": 4
+    },
+    "refund_out_of_stock": {
+      "model_calls": 5,
+      "prompt_tokens": 6900,
+      "completion_tokens": 419,
+      "total_tokens": 7319,
+      "llm_seconds": 49.81,
+      "db_queries": 9,
+      "cache_hits": 0,
+      "tool_calls": 4
+    },
+    "refund_ineligible": {
+      "model_calls": 4,
+      "prompt_tokens": 5364,
+      "completion_tokens": 367,
+      "total_tokens": 5731,
+      "llm_seconds": 26.31,
+      "db_queries": 7,
+      "cache_hits": 0,
+      "tool_calls": 3
+    },
+    "invalid_order": {
+      "model_calls": 2,
+      "prompt_tokens": 2411,
+      "completion_tokens": 112,
+      "total_tokens": 2523,
+      "llm_seconds": 19.05,
+      "db_queries": 1,
+      "cache_hits": 0,
+      "tool_calls": 1
+    },
+    "two_orders": {
+      "model_calls": 9,
+      "prompt_tokens": 14202,
+      "completion_tokens": 1056,
+      "total_tokens": 15258,
+      "llm_seconds": 91.22,
+      "db_queries": 18,
+      "cache_hits": 0,
+      "tool_calls": 8
+    },
+    "status_then_followup": {
+      "model_calls": 3,
+      "prompt_tokens": 3806,
+      "completion_tokens": 272,
+      "total_tokens": 4078,
+      "llm_seconds": 22.03,
+      "db_queries": 4,
+      "cache_hits": 0,
+      "tool_calls": 1
+    },
+    "multi_turn_refund": {
+      "model_calls": 9,
+      "prompt_tokens": 13541,
+      "completion_tokens": 763,
+      "total_tokens": 14304,
+      "llm_seconds": 79.27,
+      "db_queries": 12,
+      "cache_hits": 0,
+      "tool_calls": 5
+    }
+  },
+  "totals": {
+    "model_calls": 37,
+    "prompt_tokens": 53091,
+    "completion_tokens": 3407,
+    "total_tokens": 56498,
+    "llm_seconds": 290.96,
+    "db_queries": 60,
+    "cache_hits": 0,
+    "tool_calls": 26
+  }
+}

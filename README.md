@@ -120,7 +120,7 @@ sqlite3 orders.db "select * from orders; select * from refunds; select * from ex
 python3 test_agent.py
 ```
 
-- **14 offline tests** need no API key. They cover the dispatcher whitelist, argument validation, the refund and exchange policy guards, one-resolution-per-order, order ID normalization, reply cleanup, the ReAct loop driven by a scripted fake model, max-iteration escalation, and multi-turn memory.
+- **19 offline tests** need no API key. They cover the dispatcher whitelist, argument validation, the refund and exchange policy guards, one-resolution-per-order, order ID normalization, reply cleanup, the ReAct loop driven by a scripted fake model, max-iteration escalation, multi-turn memory, and each optimisation (cache hits and invalidation, payload pruning, turn compaction, parallel tool calls, the confirmation-email guard).
 - **4 live tests** run against Groq when `GROQ_API_KEY` is set. They check the 4 acceptance scenarios in the sample-data table, including the exact order of tool calls.
 
 Tests use a fresh in-memory database and never modify `orders.db`.
@@ -134,10 +134,87 @@ Tests use a fresh in-memory database and never modify `orders.db`.
 | [`dispatcher.py`](dispatcher.py) | Step 3 | `REGISTRY` whitelist and `dispatch()` with argument validation |
 | [`agent.py`](agent.py) | Steps 4 + 5 | ReAct loop, iteration ceiling and escalation, `.env` loading, chat CLI |
 | [`test_agent.py`](test_agent.py) | Acceptance | Offline + live tests |
+| [`benchmark.py`](benchmark.py) | Optimisation | Measures tokens, model calls, latency, DB queries, cache hits |
+| [`benchmarks/`](benchmarks) | Optimisation | `before.json` and `after.json` results |
 | `.env` | | Your API key (create it; git-ignored) |
 | `orders.db` | | SQLite data (auto-created; git-ignored) |
 
 Dependencies flow one way: `database.py` → `tools.py` → `dispatcher.py` → `agent.py`.
+
+## Performance optimisations
+
+The agent was optimised on four axes and measured with [`benchmark.py`](benchmark.py), which runs the same 7 conversations before and after (single exchange, two refund types, invalid ID, two orders in one message, a status question with a follow-up, and a 4-turn refund chat). Each conversation starts from fresh sample data.
+
+```bash
+python3 benchmark.py before    # on the old code
+python3 benchmark.py after     # on the new code
+python3 benchmark.py compare   # prints the tables below
+```
+
+### Results (Groq `openai/gpt-oss-120b`, all 7 conversations)
+
+| Metric | Before | After | Change |
+|---|---|---|---|
+| Total tokens | 56,498 | 36,478 | **-35%** |
+| Prompt tokens | 53,091 | 34,446 | **-35%** |
+| Completion tokens | 3,407 | 2,032 | **-40%** |
+| Model calls | 37 | 38 | +3% |
+| LLM time (s) | 291 | 121 | -58%* |
+| DB queries | 60 | 60 | 0% |
+
+| Conversation | Tokens before | Tokens after | Change |
+|---|---|---|---|
+| exchange | 7,285 | 4,592 | -37% |
+| refund_out_of_stock | 7,319 | 4,670 | -36% |
+| refund_ineligible | 5,731 | 3,640 | -36% |
+| invalid_order | 2,523 | 1,613 | -36% |
+| two_orders | 15,258 | 9,609 | -37% |
+| status_then_followup | 4,078 | 3,545 | -13% |
+| multi_turn_refund | 14,304 | 8,809 | -38% |
+
+\* Latency on Groq's free tier is dominated by rate-limit waits (one call took 3 s in one run and 50 s in another), so the token counts are the reliable comparison.
+
+### 1. Schema & prompt compaction
+
+The system prompt and tool schemas are sent with **every** model call, so they cost more than anything the customer types. The prompt was rewritten tersely with the same rules (3,430 → 1,871 characters, **-45%**), and the tool descriptions were shortened (schemas 2,109 → 1,558 characters, **-26%**). Prompt tokens per model call fell from about 1,373 to 867 in the exchange conversation.
+
+### 2. Payload pruning (middleware)
+
+`prune_result()` in [`agent.py`](agent.py) sits between the tools and the conversation history:
+
+- Each tool result keeps only the fields the model needs. For example, `check_inventory` drops warehouse and item name; `send_notification` keeps only `status` and `sent_to`. Errors are kept whole so the model can correct itself.
+- The email body the model wrote is replaced by `[sent; body omitted]` in the history, because it's never needed again.
+- **Turn compaction:** when a turn ends, its tool calls and results are dropped from the history and replaced by one compact "order facts" note.
+
+This is why the 4-turn chat is 38% cheaper: before, every later call re-sent all earlier tool traffic.
+
+### 3. Parallel tool calling
+
+When the model requests several tools in one turn (e.g. looking up two orders), `run_agent` runs them concurrently on a thread pool, and the prompt tells the model to batch independent calls.
+
+**Honest result:** model calls didn't drop (`two_orders` was 9 calls before and after), because this model already batched independent calls before the change. The tools also share one SQLite connection, so the dispatcher runs them one at a time under a lock. The concurrency would matter once tools do real network I/O (an email API, a remote database); the round-trip saving comes from the model batching, not from threads.
+
+### 4. In-memory caching
+
+`lookup_order` and `check_inventory` results are cached in memory for at most **2 minutes** ([`tools.py`](tools.py)). Safety rules:
+
+- Any refund or exchange immediately **drops the cached entries** it affects.
+- The refund and exchange checks always read the database directly, so a cached stock count can **never approve an exchange** for an item that just sold out.
+- Errors are never cached.
+
+**Honest result:** DB queries didn't change in the benchmark (60 → 60, 1 cache hit), because each conversation is short and starts with an empty cache, and the order-facts note from optimisation 2 means the model rarely re-looks orders up. The cache pays off with real traffic (many customers asking about the same orders) and a remote database. With several server processes it should move to Redis.
+
+### Problems found while optimising (and fixed)
+
+Measuring alone wasn't enough. Checking the agent's actual behaviour after each change exposed three regressions:
+
+| Problem | Cause | Fix |
+|---|---|---|
+| Sent the same email 3 times, then escalated | Pruning removed `"status": "success"`, so the model couldn't tell the email had gone | `status` is always kept |
+| "Is it still eligible for an exchange?" **created an exchange** (3/3 runs; original code 0/3) | Turn compaction threw away the order facts, so the model re-ran the whole workflow | Keep a compact order-facts note per turn |
+| Completion tokens rose 83% after compaction | `gpt-oss` is a reasoning model and thought longer with a terser prompt | `reasoning_effort="low"` (gpt-oss models only) |
+
+A new code guard also makes sure **every refund or exchange ends with a confirmation email to that order's address**, since one run of the two-orders case emailed only one of the two customers.
 
 ## Configuration
 

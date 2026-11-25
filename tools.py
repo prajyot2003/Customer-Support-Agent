@@ -3,9 +3,43 @@
 Every tool returns a structured dict with "status": "success" | "error".
 """
 import re
+import time
 import uuid
 
 import database
+
+# --------------------------------------------------------------------------
+# Optimisation 4: in-memory TTL cache for the read-only tools (lookup_order, check_inventory).
+# Entries live at most CACHE_TTL seconds and are dropped immediately when a refund/exchange changes the
+# underlying rows. The refund/exchange guards below always read the database directly, so a cached stock
+# count can never approve an exchange. Callers are serialised by the dispatcher lock.
+# ponytail: per-process dict; move to Redis if the agent runs as several processes.
+# --------------------------------------------------------------------------
+CACHE_TTL = 120
+_cache = {}
+CACHE_STATS = {"hits": 0, "misses": 0}
+
+
+def cache_clear():
+    _cache.clear()
+    CACHE_STATS.update(hits=0, misses=0)
+
+
+def _cached(key, compute):
+    entry = _cache.get(key)
+    if entry and entry[0] > time.monotonic():
+        CACHE_STATS["hits"] += 1
+        return dict(entry[1])
+    CACHE_STATS["misses"] += 1
+    value = compute()
+    if value.get("status") == "success":  # never cache errors: a missing order may be created later
+        _cache[key] = (time.monotonic() + CACHE_TTL, value)
+    return dict(value)
+
+
+def _invalidate(order_id=None, item_id=None):
+    _cache.pop(("order", order_id), None)
+    _cache.pop(("item", item_id), None)
 
 
 def normalize_order_id(order_id):
@@ -40,6 +74,14 @@ def _stock(item_id):
 # Step 1: Tools
 # --------------------------------------------------------------------------
 def lookup_order(order_id):
+    return _cached(("order", normalize_order_id(order_id)), lambda: _lookup_order(order_id))
+
+
+def check_inventory(item_id):
+    return _cached(("item", item_id.strip().upper()), lambda: _check_inventory(item_id))
+
+
+def _lookup_order(order_id):
     o = _order(order_id)
     if not o:
         return {"status": "error", "error": "ORDER_NOT_FOUND",
@@ -53,7 +95,7 @@ def lookup_order(order_id):
             "existing_resolution": _existing_resolution(o["order_id"])}
 
 
-def check_inventory(item_id):
+def _check_inventory(item_id):
     row = database.DB.execute("SELECT * FROM inventory WHERE item_id = ?", (item_id.strip().upper(),)).fetchone()
     if not row:
         return {"status": "error", "error": "ITEM_NOT_FOUND", "message": f"Unknown item id '{item_id}'."}
@@ -79,6 +121,7 @@ def create_exchange(order_id):
     with db:
         db.execute("UPDATE inventory SET stock = stock - 1 WHERE item_id = ?", (o["item_id"],))
         db.execute("INSERT INTO exchanges VALUES (?, ?, ?)", (exchange_id, o["order_id"], o["item_id"]))
+    _invalidate(order_id=o["order_id"], item_id=o["item_id"])
     return {"status": "success", "exchange_id": exchange_id, "order_id": o["order_id"], "item_id": o["item_id"]}
 
 
@@ -98,6 +141,7 @@ def process_refund(order_id, reason):
     refund_id = "RFD-" + uuid.uuid4().hex[:8].upper()
     with db:  # amount comes from the DB, never from the model
         db.execute("INSERT INTO refunds VALUES (?, ?, ?, ?)", (refund_id, o["order_id"], o["amount"], reason))
+    _invalidate(order_id=o["order_id"])
     return {"status": "success", "refund_id": refund_id, "order_id": o["order_id"],
             "amount_refunded": o["amount"], "method": "original payment method"}
 
@@ -123,24 +167,14 @@ def _schema(name, description, params):
                        "required": list(params)}}}
 
 
+# Optimisation 1: compact schemas. Same names, parameters and required fields; terse descriptions.
 TOOLS = [
-    _schema("lookup_order",
-            "Look up an order in the database. Returns customer name, email, item, amount, order status, "
-            "exchange eligibility, and existing_resolution (a refund/exchange already done for this order, or null). "
-            "Always call this first.",
-            {"order_id": "Order identifier exactly as the customer gave it, e.g. 'ORD-1001', 'ord1001' or '1001'."}),
-    _schema("check_inventory",
-            "Check real-time warehouse stock for an item to see if a replacement unit is available.",
-            {"item_id": "Item identifier from lookup_order, e.g. 'SKU-KETTLE'."}),
-    _schema("create_exchange",
-            "Confirm a replacement exchange. Use ONLY when the order is exchange-eligible AND stock > 0.",
-            {"order_id": "Order identifier to exchange."}),
-    _schema("process_refund",
-            "Issue a financial refund to the customer's original payment method. Use ONLY when a replacement "
-            "is unavailable (stock is 0) or the order is not eligible for exchange.",
-            {"order_id": "Order identifier to refund.", "reason": "Short reason for the refund."}),
-    _schema("send_notification",
-            "Send the customer an official confirmation email summarising the resolution. "
-            "Call after an exchange or refund succeeds.",
-            {"email": "Customer email from lookup_order.", "message": "Email body text."}),
+    _schema("lookup_order", "Get order: customer, email, item, amount, status, exchange eligibility, "
+                            "existing_resolution. Call first.", {"order_id": "As typed, e.g. ORD-1001 or 1001"}),
+    _schema("check_inventory", "Replacement stock for an item.", {"item_id": "From lookup_order"}),
+    _schema("create_exchange", "Ship a replacement. Only if eligible and stock > 0.", {"order_id": "Order ID"}),
+    _schema("process_refund", "Refund to original payment. Only if stock is 0 or not eligible.",
+            {"order_id": "Order ID", "reason": "Short reason"}),
+    _schema("send_notification", "Email the customer after an exchange or refund.",
+            {"email": "From lookup_order", "message": "Plain-text body"}),
 ]

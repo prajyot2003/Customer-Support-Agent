@@ -11,6 +11,7 @@ from dispatcher import dispatch
 
 def fresh():
     database.DB = database.init_db(":memory:")  # tests never touch the real orders.db
+    tools.cache_clear()  # cached rows from a previous test's database must not leak in
 
 
 # ---------------- Offline: tools, dispatcher, guardrails ----------------
@@ -125,6 +126,63 @@ def test_escalation_reports_actions_already_taken():
     assert "refund of $34.50 for ORD-1002" in out["reply"] and "RFD-" in out["reply"]
 
 
+# ---------------- Offline: optimisations ----------------
+def test_cache_hits_and_write_invalidation():
+    fresh()
+    tools.lookup_order("ORD-1001")
+    tools.lookup_order("ord1001")  # same order, different spelling -> same cache key
+    tools.check_inventory("SKU-HEADPHONES")
+    assert tools.CACHE_STATS == {"hits": 1, "misses": 2}
+    tools.create_exchange("ORD-1001")  # write must invalidate both cached rows
+    assert tools.check_inventory("SKU-HEADPHONES")["stock"] == 11
+    assert tools.lookup_order("ORD-1001")["existing_resolution"]["type"] == "exchange"
+    assert tools.lookup_order("ORD-0000")["status"] == "error" and ("order", "ORD-0000") not in tools._cache
+
+
+def test_prune_result_keeps_only_needed_fields():
+    assert agent.prune_result("check_inventory", tools.check_inventory("SKU-KETTLE")) == {"status": "success", "item_id": "SKU-KETTLE", "stock": 0}
+    # status must survive pruning, or the model can't tell the email was sent and sends it again
+    assert agent.prune_result("send_notification", {"status": "success", "notification_id": 3, "sent_to": "a@b.c"}) == {"status": "success", "sent_to": "a@b.c"}
+    looked = agent.prune_result("lookup_order", tools.lookup_order("ORD-1003"))
+    assert "existing_resolution" not in looked and looked["exchange_eligible"] is False  # None dropped, False kept
+    err = agent.prune_result("lookup_order", tools.lookup_order("ORD-0000"))
+    assert err["status"] == "error" and err["error"] == "ORDER_NOT_FOUND" and "message" in err
+
+
+def test_turn_compaction_and_email_body_pruning():
+    fresh()
+    history = []
+    fake = FakeClient([[("lookup_order", {"order_id": "ORD-1002"})],
+                       [("send_notification", {"email": "arjun@example.com", "message": "x" * 500})],
+                       "Refunded, reference RFD-1."])
+    agent.run_agent("ORD-1002 broken", client=fake, verbose=False, messages=history)
+    # tool traffic dropped after the turn; the order facts survive as one compact note
+    assert [m["role"] for m in history] == ["system", "user", "assistant", "system"]
+    assert '"ORD-1002"' in history[-1]["content"] and '"exchange_eligible":true' in history[-1]["content"]
+    assert agent._history_args("send_notification", '{"email":"a@b.c","message":"long"}') == '{"email":"a@b.c","message":"[sent; body omitted]"}'
+
+
+def test_guard_forces_email_for_every_resolution():
+    fresh()
+    fake = FakeClient([[("lookup_order", {"order_id": "ORD-1002"})],
+                       [("process_refund", {"order_id": "ORD-1002", "reason": "out of stock"})],
+                       "Refunded!",  # tries to finish without emailing -> guard sends it back
+                       [("send_notification", {"email": "arjun@example.com", "message": "Refunded"})],
+                       "Refunded, email sent."])
+    out = agent.run_agent("ORD-1002 broken", client=fake, verbose=False)
+    assert out["trace"][-1] == "send_notification" and out["reply"] == "Refunded, email sent."
+
+
+def test_parallel_tool_calls_in_one_turn():
+    fresh()
+    fake = FakeClient([[("lookup_order", {"order_id": "ORD-1001"}), ("lookup_order", {"order_id": "ORD-1002"}),
+                        ("check_inventory", {"item_id": "SKU-HEADPHONES"}), ("check_inventory", {"item_id": "SKU-KETTLE"})],
+                       "Done."])
+    out = agent.run_agent("two orders", client=fake, verbose=False)
+    assert out["trace"] == ["lookup_order", "lookup_order", "check_inventory", "check_inventory"]
+    assert not out["escalated"]
+
+
 def test_multi_turn_keeps_history():
     fresh()
     history = []
@@ -134,7 +192,9 @@ def test_multi_turn_keeps_history():
     agent.run_agent("Sorry, it's ORD-1001", client=fake, verbose=False, messages=history)
     users = [m["content"] for m in history if m["role"] == "user"]
     assert users == ["ORD-0000 is broken", "Sorry, it's ORD-1001"]
-    assert history[0]["role"] == "system" and history[-1] == {"role": "assistant", "content": "Found it."}
+    assert history[0]["role"] == "system"
+    assert [m["content"] for m in history if m["role"] == "assistant"][-1] == "Found it."
+    assert history[-1]["content"].startswith("Order facts from this chat:")  # facts kept after compaction
 
 
 # ---------------- Live: acceptance criteria against Groq ----------------
