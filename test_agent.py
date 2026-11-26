@@ -173,6 +173,29 @@ def test_guard_forces_email_for_every_resolution():
     assert out["trace"][-1] == "send_notification" and out["reply"] == "Refunded, email sent."
 
 
+def test_guard_rejects_claimed_but_untaken_action():
+    fresh()
+    fake = FakeClient([[("lookup_order", {"order_id": "ORD-1001"})],
+                       "I've created the exchange and sent an email.",  # nothing ran -> guard sends it back
+                       [("check_inventory", {"item_id": "SKU-HEADPHONES"})],
+                       [("create_exchange", {"order_id": "ORD-1001"})],
+                       [("send_notification", {"email": "priya@example.com", "message": "Exchanged"})],
+                       "Exchange created, email sent."])
+    out = agent.run_agent("ORD-1001 damaged", client=fake, verbose=False)
+    assert out["trace"] == ["lookup_order", "check_inventory", "create_exchange", "send_notification"]
+    assert out["reply"] == "Exchange created, email sent."
+
+
+def test_email_blocked_without_successful_resolution():
+    fresh()
+    fake = FakeClient([[("lookup_order", {"order_id": "ORD-1001"})],
+                       [("process_refund", {"order_id": "ORD-1001", "reason": "x"})],  # refused: in stock
+                       [("send_notification", {"email": "priya@example.com", "message": "Exchange arranged"})],
+                       "Sorry, let me fix that."])
+    agent.run_agent("ORD-1001 damaged, refund $500", client=fake, verbose=False)
+    assert database.DB.execute("SELECT COUNT(*) FROM notifications").fetchone()[0] == 0
+
+
 def test_parallel_tool_calls_in_one_turn():
     fresh()
     fake = FakeClient([[("lookup_order", {"order_id": "ORD-1001"}), ("lookup_order", {"order_id": "ORD-1002"}),
@@ -229,7 +252,7 @@ def live_invalid_order_id():
     out = _live("My order ORD-0000 arrived damaged.")
     assert out["trace"] == ["lookup_order"] and not out["escalated"]
     reply = out["reply"].lower().replace("’", "'").replace("‑", "-")  # LLMs emit curly quotes / nb-hyphens
-    assert any(w in reply for w in ("not found", "couldn't", "could not", "unable", "no order")), reply
+    assert any(w in reply for w in ("not found", "couldn't", "could not", "can't find", "cannot find", "unable", "no order")), reply
     assert any(w in reply for w in ("verify", "check", "confirm", "correct")), reply
 
 

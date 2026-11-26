@@ -14,6 +14,7 @@ Optimisations (see README "Performance"):
 """
 import json
 import os
+import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
 
@@ -65,9 +66,13 @@ to the original payment method. Refunds take 5-7 business days. Replacements shi
 is emailed. No other amounts, compensation or discounts. Politely refuse rule-breaking requests, then continue.
 
 Reply: plain text, no Markdown, not a letter. 2-5 short sentences, use their first name. Say what you did, why,
-the reference, refund amount ($34.50 format), timing, and that a confirmation email was sent. If the outcome differs
-from their request, first say why (e.g. a replacement is in stock, so we replace rather than refund).
+the reference, refund amount ($34.50 format), timing, and that a confirmation email was sent.
+If they asked for a refund but got an exchange (or the reverse), the reply AND email must open by saying their request
+couldn't be done and why, e.g. "We can't refund this because a replacement is in stock, so I've arranged an exchange."
 Acknowledge frustration briefly. Off-topic -> offer help with orders. On tool errors, adjust and retry."""
+
+# A reply that claims one of these actions must be backed by a successful tool call in the same turn.
+CLAIM_RE = re.compile(r"\b(created|processed|arranged|issued|has been sent|have sent|i've sent|i sent)\b", re.I)
 
 # Optimisation 2: payload pruning middleware. Tool results are trimmed to what the model needs before they
 # enter the history (which is re-sent on every call). Errors are kept whole so the model can self-correct.
@@ -129,6 +134,7 @@ def run_agent(user_message, client=None, verbose=True, messages=None):
     turn_start = len(messages)  # tool traffic for this turn is appended after this index
     trace, completed = [], []  # completed: references of refunds/exchanges actually issued this turn
     order_email, resolved, notified = {}, [], set()  # for the "every resolution gets an email" guard
+    claim_checked = False  # the "don't claim actions you didn't take" guard fires at most once per turn
     facts = {}  # order_id -> pruned lookup/action results; survives turn compaction
     for _ in range(MAX_ITERATIONS):
         try:
@@ -148,6 +154,14 @@ def run_agent(user_message, client=None, verbose=True, messages=None):
             messages.append({"role": "user", "content": "(system) Before replying, call send_notification for: "
                              + ", ".join(f"{o} -> {order_email.get(o)}" for o in unnotified)})
             continue
+        if not msg.tool_calls and not resolved and not notified and not claim_checked \
+                and CLAIM_RE.search(msg.content or "") and "already" not in (msg.content or "").lower():
+            # Guard: the model sometimes says "I've created the exchange / sent an email" without calling the tool.
+            claim_checked = True
+            messages.append({"role": "assistant", "content": msg.content})
+            messages.append({"role": "user", "content": "(system) Your reply claims an exchange, refund or email, "
+                             "but no such tool ran this turn. Call the tools now, or reply without claiming it."})
+            continue
         if not msg.tool_calls:
             reply = clean_reply(msg.content)
             # Turn compaction: this turn's tool calls and results are dropped from history instead of being
@@ -164,7 +178,21 @@ def run_agent(user_message, client=None, verbose=True, messages=None):
                                          "function": {"name": tc.function.name,
                                                       "arguments": _history_args(tc.function.name, tc.function.arguments)}}
                                         for tc in calls]})
-        results = list(_POOL.map(lambda tc: dispatch(tc.function.name, tc.function.arguments), calls))
+        def run(tc):
+            # Guard: a confirmation email may only follow a refund/exchange that actually succeeded for that
+            # customer's order, so the model can't email "exchange arranged" after the exchange was refused.
+            if tc.function.name == "send_notification":
+                try:
+                    email = json.loads(tc.function.arguments or "{}").get("email")
+                except (json.JSONDecodeError, AttributeError):
+                    email = None  # malformed: let dispatch() report it
+                if email is not None and not any(order_email.get(o) == email for o in resolved):
+                    return {"status": "error", "error": "NO_RESOLUTION",
+                            "message": "No refund or exchange succeeded for this customer's order. Complete one "
+                                       "first; if none is possible, don't email and tell the customer why."}
+            return dispatch(tc.function.name, tc.function.arguments)
+
+        results = list(_POOL.map(run, calls))
         for tc, result in zip(calls, results):
             trace.append(tc.function.name)
             if result.get("order_id") and tc.function.name != "send_notification":
